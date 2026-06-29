@@ -1,39 +1,40 @@
 import { createContext, useContext, useState, useEffect } from 'react';
 
-export async function apiFetch(endpoint, { method = 'GET', body, ...opts } = {}) {
+export async function apiFetch(endpoint, { method = 'GET', body } = {}) {
   const token = localStorage.getItem('token');
+
   const headers = {
     'Content-Type': 'application/json',
-    ...(token && { Authorization: `Bearer ${token}` }),
-    // Attach doctor ID for backend calls when JWT is not used
-    ...(() => {
-      try {
-        const stored = localStorage.getItem('user');
-        if (stored) {
-          const user = JSON.parse(stored);
-          if (user && user.id) {
-            return { 'x-doctor-id': user.id };
-          }
-        }
-      } catch (_) {}
-      return {};
-    })(),
   };
-  const cfg = { method, headers, ...opts };
-  if (body) cfg.body = JSON.stringify(body);
-  const apiBase = import.meta.env.VITE_API_URL || 'http://localhost:5005';
-  const url = apiBase ? `${apiBase}${endpoint}` : `/api${endpoint}`;
-  const resp = await fetch(url, cfg);
-  const data = await resp.json();
-  if (!resp.ok) {
-    const err = new Error(data.error || resp.statusText);
-    err.response = resp;
-    err.data = data;
-    throw err;
+
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
   }
+
+  const resp = await fetch(
+    `${import.meta.env.VITE_API_URL || 'http://localhost:5005'}${endpoint}`,
+    {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+    }
+  );
+
+  const text = await resp.text();
+
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(text);
+  }
+
+  if (!resp.ok) {
+    throw new Error(data.error || 'Request failed');
+  }
+
   return data;
 }
-
 // ---------- Auth Context ----------
 const AuthContext = createContext();
 
@@ -54,14 +55,21 @@ export function AuthProvider({ children }) {
   }, []);
 
   const login = async (username, password) => {
-    const { doctorId, name } = await apiFetch('/auth/login', {
-      method: 'POST',
-      body: { username, password },
-    });
-    const loggedUser = { id: doctorId, name };
-    localStorage.setItem('user', JSON.stringify(loggedUser));
-    setUser(loggedUser);
-  };
+  const res = await apiFetch('/auth/login', {
+    method: 'POST',
+    body: { username, password },
+  });
+
+  console.log("LOGIN RESPONSE:", res);
+
+  localStorage.setItem('token', res.token);
+  localStorage.setItem('user', JSON.stringify({
+    id: res.doctorId,
+    name: res.name
+  }));
+
+  setUser({ id: res.doctorId, name: res.name });
+};
 
   const logout = () => {
     localStorage.removeItem('token');

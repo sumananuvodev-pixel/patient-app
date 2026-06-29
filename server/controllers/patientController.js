@@ -154,12 +154,12 @@ exports.createPatient = async (req, res) => {
           name,
           dob,
           gender,
-          encryptedContact,
+          contact,
           appointment_date || null,
           appointment_time || null,
           fees || null,
           payment_mode || null,
-          encryptedCondition,
+          patient_condition || null,
         ]
       );
 
@@ -345,10 +345,10 @@ exports.exportPatientToExcel = async (req, res) => {
       'Date of Birth': patient.dob || '',
       'Gender': patient.gender || '',
       'Hospital': patient.hospital_name || '',
-      'Contact': patient.contact ? decrypt(patient.contact) : '',
+      'Contact': patient.contact || '',
       'Appointment Date': patient.appointment_date ? new Date(patient.appointment_date).toLocaleDateString() : '',
       'Appointment Time': patient.appointment_time || '',
-      'Condition': patient.patient_condition ? decrypt(patient.patient_condition) : ''
+      'Condition': patient.patient_condition || ''
     }];
 
     const worksheet = XLSX.utils.json_to_sheet(patientData);
