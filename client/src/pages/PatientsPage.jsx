@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react';
-import { Box, Typography, CircularProgress, Table, TableBody, TableCell, TableHead, TableRow, Button, TextField, FormControl, InputLabel, Select, MenuItem } from '@mui/material';
+import { Box, Typography, CircularProgress, Table, TableBody, TableCell, TableHead, TableRow, Button, TextField, FormControl, InputLabel, Select, MenuItem, IconButton } from '@mui/material';
 import { Link } from 'react-router-dom';
 import { apiFetch } from '../services/api.jsx';
+import DownloadIcon from '@mui/icons-material/Download';
+// Base URL for direct fetches (fallback to same value used in apiFetch)
+const apiBase = import.meta.env.VITE_API_URL || 'http://localhost:5001';
 
 export default function PatientsPage() {
   const [hospitals, setHospitals] = useState([]);
@@ -14,6 +17,62 @@ export default function PatientsPage() {
   const [patients, setPatients] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+
+  // Helper to get auth headers (token stored in localStorage)
+const getAuthHeaders = () => {
+  const token = localStorage.getItem('token');
+  const headers = {
+    'Accept': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  };
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+  // Include doctor ID header if used by backend
+  try {
+    const userStr = localStorage.getItem('user');
+    if (userStr) {
+      const user = JSON.parse(userStr);
+      if (user && user.id) {
+        headers['x-doctor-id'] = user.id;
+      }
+    }
+  } catch (_) {}
+  return headers;
+};
+
+const handleExportSinglePatient = async (patientId) => {
+  try {
+    console.log('Export request URL:', `${apiBase}/patients/export/${patientId}`);
+    console.log('Fetching export for patient', patientId);
+    const response = await fetch(`${apiBase}/patients/export/${patientId}`, {
+      method: 'GET',
+      headers: getAuthHeaders()
+    });
+    if (!response.ok) {
+      // Try to parse JSON error for a clearer message
+      let errMsg = 'Failed to export patient';
+      try {
+        const errJson = await response.json();
+        errMsg = errJson.error || errMsg;
+      } catch (_) {}
+      throw new Error(errMsg);
+    }
+    const blob = await response.blob();
+    // Note: Browsers may report MIME type as application/octet-stream for xlsx from localhost
+    // So we skip strict MIME checking and proceed with the download
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `patient_${patientId}_details.xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+  } catch (err) {
+    console.error('Error exporting patient:', err);
+    alert(err.message || 'Failed to export patient details');
+  }
+};
 
   const [filters, setFilters] = useState({ name: '', appointmentStart: '', appointmentEnd: '', hospitalId: '' });
 
@@ -153,10 +212,24 @@ export default function PatientsPage() {
                   <em>—</em>
                 )}
               </TableCell>
+              <TableCell>
+                <IconButton
+                  color="primary"
+                  onClick={() => handleExportSinglePatient(p.id)}
+                  title="Export to Excel"
+                >
+                  <DownloadIcon />
+                </IconButton>
+              </TableCell>
             </TableRow>
           ))}
         </TableBody>
       </Table>
+       <Box sx={{ mt: 2 }}>
+  <Typography variant="body2" color="text.secondary">
+    Follow up required for some patients (auto-generated note)
+  </Typography>
+</Box>
     </Box>
   );
 }

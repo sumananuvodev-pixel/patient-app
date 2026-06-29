@@ -1,4 +1,6 @@
 const pool = require('../config/db');
+const { encrypt, decrypt } = require('../utils/crypto');
+const XLSX = require('xlsx');
 
 /**
  * GET /patients?hospitalId=&gender=&startDate=&endDate=
@@ -133,7 +135,12 @@ exports.createPatient = async (req, res) => {
       return res.status(400).json({ error: 'Required fields missing' });
     }
 
-   
+
+    
+
+    // Encrypt sensitive fields before storing
+    const encryptedContact = contact ? encrypt(contact) : null;
+    const encryptedCondition = patient_condition ? encrypt(patient_condition) : null;
 
     try {
       const [result] = await pool.query(
@@ -147,12 +154,12 @@ exports.createPatient = async (req, res) => {
           name,
           dob,
           gender,
-          contact || null,
+          encryptedContact,
           appointment_date || null,
           appointment_time || null,
           fees || null,
           payment_mode || null,
-          patient_condition  || null,
+          encryptedCondition,
         ]
       );
 
@@ -190,6 +197,190 @@ exports.createPatient = async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Database error' });
+  }
+};
+
+/**
+ * GET /patients/export - Export all filtered patients to Excel
+ * @desc   Generate an Excel file with filtered patient data
+ * @route  GET /patients/export
+ */
+exports.exportPatientsToExcel = async (req, res) => {
+  console.log('🔧 exportPatientsToExcel called – doctor ID:', req.doctor?.id, 'query:', req.query);
+  try {
+    const {
+      hospitalId,
+      name,
+      dobStart,
+      dobEnd,
+      appointmentStart,
+      appointmentEnd
+    } = req.query;
+
+    // Build base query with doctor filter
+    let query = `
+      SELECT
+        p.id,
+        p.name,
+        p.dob,
+        p.gender,
+        p.hospital_id,
+        p.appointment_date,
+        p.appointment_time,
+        h.name AS hospital_name
+      FROM patients p
+      JOIN hospitals h ON p.hospital_id = h.id
+      WHERE p.doctor_id = ?
+    `;
+    const params = [req.doctor?.id];
+
+    // Apply optional query filters
+    if (hospitalId) { query += ' AND p.hospital_id = ?'; params.push(hospitalId); }
+    if (name) { query += ' AND p.name LIKE ?'; params.push(`%${name}%`); }
+    if (dobStart) { query += ' AND p.dob >= ?'; params.push(dobStart); }
+    if (dobEnd) { query += ' AND p.dob <= ?'; params.push(dobEnd); }
+    if (appointmentStart) { query += ' AND DATE(p.appointment_date) >= ?'; params.push(appointmentStart); }
+    if (appointmentEnd) { query += ' AND DATE(p.appointment_date) <= ?'; params.push(appointmentEnd); }
+
+    query += ' ORDER BY p.created_at DESC';
+
+    // Retrieve patient rows
+    const [patientRows] = await pool.query(query, params);
+
+    // Gather procedures for all returned patients in a single query (if any patients exist)
+    let procedures = [];
+    if (patientRows.length) {
+      const patientIds = patientRows.map(p => p.id);
+      const placeholders = patientIds.map(() => '?').join(',');
+      const [othersRows] = await pool.query(
+        `SELECT patient_id, p_procedure, fee, payment_mode FROM patient_others WHERE patient_id IN (${placeholders})`,
+        patientIds
+      );
+      procedures = othersRows;
+    }
+
+    // Transform patient data into a flat array suitable for json_to_sheet
+    const patientData = patientRows.map(p => ({
+      'Patient ID': p.id,
+      'Full Name': p.name,
+      'Date of Birth': p.dob ? new Date(p.dob).toISOString().split('T')[0] : '',
+      'Gender': p.gender || '',
+      'Hospital': p.hospital_name || '',
+      'Appointment Date': p.appointment_date ? new Date(p.appointment_date).toISOString().split('T')[0] : '',
+      'Appointment Time': p.appointment_time || ''
+    }));
+
+    // Create the workbook and primary worksheet
+    const workbook = XLSX.utils.book_new();
+    const patientSheet = XLSX.utils.json_to_sheet(patientData, {
+      header: ['Patient ID', 'Full Name', 'Date of Birth', 'Gender', 'Hospital', 'Appointment Date', 'Appointment Time']
+    });
+    XLSX.utils.book_append_sheet(workbook, patientSheet, 'Patients');
+
+    // If procedures were found, add a second sheet with a simple flat representation
+    if (procedures.length) {
+      const procData = procedures.map(proc => ({
+        'Patient ID': proc.patient_id,
+        'Procedure': proc.p_procedure,
+        'Fee': proc.fee || '',
+        'Payment Mode': proc.payment_mode || ''
+      }));
+      const procSheet = XLSX.utils.json_to_sheet(procData, {
+        header: ['Patient ID', 'Procedure', 'Fee', 'Payment Mode']
+      });
+      XLSX.utils.book_append_sheet(workbook, procSheet, 'Procedures');
+    }
+
+    // Write workbook to a Buffer (standard xlsx, no compression)
+    const excelBuffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+
+    // Send with proper headers for download
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="patients_report.xlsx"');
+    res.send(excelBuffer);
+  } catch (err) {
+    console.error('Error generating Excel report:', err);
+    res.status(500).json({ error: 'Error generating Excel file' });
+  }
+};
+
+/**
+ * GET /patients/export/:id - Export a single patient to Excel
+ * @desc   Generate an Excel file with data for one patient
+ * @route  GET /patients/export/:id
+ */
+exports.exportPatientToExcel = async (req, res) => {
+  try {
+    const patientId = req.params.id;
+
+    // Validate patient belongs to doctor
+    const [patientRows] = await pool.query(
+      `SELECT p.*, h.name AS hospital_name
+       FROM patients p
+       JOIN hospitals h ON p.hospital_id = h.id
+       WHERE p.id = ? AND p.doctor_id = ?`,
+      [patientId, req.doctor?.id]
+    );
+
+    if (patientRows.length === 0) {
+      return res.status(404).json({ error: 'Patient not found or not authorized' });
+    }
+
+    const patient = patientRows[0];
+
+    // Get patient's procedures
+    const [procedures] = await pool.query(
+      `SELECT p_procedure, fee, payment_mode
+       FROM patient_others
+       WHERE patient_id = ?`, [patient.id]
+    );
+
+    // Create workbook and worksheet
+    const workbook = XLSX.utils.book_new();
+
+    // Patient details data
+    const patientData = [{
+      'Patient ID': patient.id,
+      'Full Name': patient.name,
+      'Date of Birth': patient.dob || '',
+      'Gender': patient.gender || '',
+      'Hospital': patient.hospital_name || '',
+      'Contact': patient.contact ? decrypt(patient.contact) : '',
+      'Appointment Date': patient.appointment_date ? new Date(patient.appointment_date).toLocaleDateString() : '',
+      'Appointment Time': patient.appointment_time || '',
+      'Condition': patient.patient_condition ? decrypt(patient.patient_condition) : ''
+    }];
+
+    const worksheet = XLSX.utils.json_to_sheet(patientData);
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Patient Details');
+
+    // Add procedures sheet if they exist
+    if (procedures.length > 0) {
+      const procData = procedures.map(proc => ({
+        'Procedure': proc.p_procedure,
+        'Fee': proc.fee || '',
+        'Payment Mode': proc.payment_mode || ''
+      }));
+      const procWorksheet = XLSX.utils.json_to_sheet(procData);
+      XLSX.utils.book_append_sheet(workbook, procWorksheet, 'Procedures');
+    }
+
+    // Generate Excel file buffer
+    const excelBuffer = XLSX.write(workbook, {
+      type: 'buffer',
+      bookType: 'xlsx'
+    });
+
+    // Set appropriate headers
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="patient_${patient.id}_details.xlsx"`);
+
+    // Send the file
+    res.send(excelBuffer);
+
+  } catch (error) {
+    console.error('Error generating patient Excel report:', error);
+    res.status(500).send('Error generating Excel file');
   }
 };
 

@@ -1,21 +1,26 @@
 /**
- * Dummy authentication middleware – no JWT verification.
- * It simply calls `next()` so every route is public.
+ * JWT authentication middleware – verifies the Authorization header and
+ * attaches the decoded doctor payload to `req.doctor`. If verification fails,
+ * a 401 response is sent and the request chain stops.
  */
 const jwt = require('jsonwebtoken');
 
-/**
- * JWT authentication middleware.
- * Expects Authorization header: "Bearer <token>".
- * On success, attaches `req.doctor` with the token payload.
- * On failure, responds with 401.
- */
 function authenticateToken(req, res, next) {
-  // No JWT authentication – simply attach a dummy doctor for all requests.
-  // In a real production app you would replace this with proper auth.
-  req.doctor = { id: 0, name: 'dev-doctor' };
-  next();
-}
+  const JWT_SECRET = process.env.JWT_SECRET;
+  const authHeader = req.headers.authorization;
 
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Authorization header missing or malformed' });
+  }
+
+  const token = authHeader.split(' ')[1];
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.doctor = decoded;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+}
 
 module.exports = { authenticateToken };

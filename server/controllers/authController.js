@@ -1,4 +1,5 @@
 const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 const pool = require('../config/db');
 
 /**
@@ -41,8 +42,13 @@ exports.login = async (req, res) => {
     const ok = await bcrypt.compare(password, doctor.password_hash);
     if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
 
-    // No JWT is created – simply return the doctor ID and name.
-    res.json({ doctorId: doctor.id, name: doctor.name });
+    // Create a JWT for the authenticated doctor
+    const token = jwt.sign(
+      { id: doctor.id, name: doctor.name },
+      process.env.JWT_SECRET,
+      { expiresIn: '2h' }
+    );
+    res.json({ token, doctorId: doctor.id, name: doctor.name });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Internal error' });
